@@ -157,11 +157,9 @@ final class OpenMissionControlCore: ObservableObject {
         logger.info("Mission Control state changed: \(state.rawValue)")
 
         if state.isActive {
-            setOverlayWindowExpanded(true)
             showOverlay()
         } else {
             hideOverlay()
-            setOverlayWindowExpanded(false)
         }
     }
 
@@ -302,13 +300,13 @@ final class OpenMissionControlCore: ObservableObject {
             CGWindowListCopyWindowInfo(CGWindowListOption.optionOnScreenOnly, kCGNullWindowID)
             as? [[String: Any]] ?? []
 
-        if ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 {
-            isMissionControlSurfaceVisible = windowList.contains { window in
-                window[kCGWindowOwnerName as String] as? String == "WindowManager"
-                    && window[kCGWindowLayer as String] as? Int == 19
-            }
-        } else {
-            isMissionControlSurfaceVisible = MissionControlMonitor.shared.currentState.isActive
+        let dockPID = MissionControlMonitor.shared.getDockPID()
+        isMissionControlSurfaceVisible = windowList.contains { window in
+            guard let layer = window[kCGWindowLayer as String] as? Int else { return false }
+            let pid = window[kCGWindowOwnerPID as String] as? pid_t
+            let owner = window[kCGWindowOwnerName as String] as? String
+            return (dockPID != nil && pid == dockPID && layer == 18)
+                || (owner == "WindowManager" && layer == 19)
         }
 
         let filteredWindows = windowList.filter { window in
@@ -340,7 +338,6 @@ final class OpenMissionControlCore: ObservableObject {
 
     private var overlayWindow: NSWindow?
     private var overlayContentView: NSHostingView<OverlayView>?
-    private let inactiveOverlayWindowSize = CGSize(width: 1, height: 1)
     private var previousWindowFrames: [CGWindowID: CGRect]?
     private(set) var overlayRect: CGRect?
     private(set) var hoveredWindow: [String: Any]?
@@ -398,11 +395,14 @@ final class OpenMissionControlCore: ObservableObject {
 
                     let newFrame = NSRect(
                         x: x + 8, y: convertedY - 8, width: overlayWidth, height: sizing.height)
-                    if let overlayWindow, let overlayContentView {
-                        overlayContentView.frame = newFrame.offsetBy(
-                            dx: -overlayWindow.frame.minX, dy: -overlayWindow.frame.minY)
-                        overlayContentView.isHidden = false
-                        overlayContentView.needsDisplay = true
+                    if let overlayWindow {
+                        overlayWindow.setFrame(newFrame, display: true)
+                        if let overlayContentView {
+                            overlayContentView.frame = NSRect(origin: .zero, size: newFrame.size)
+                            overlayContentView.isHidden = false
+                            overlayContentView.needsDisplay = true
+                        }
+                        overlayWindow.orderFrontRegardless()
                     }
 
                     let cgOverlayRect = CGRect(
@@ -416,6 +416,8 @@ final class OpenMissionControlCore: ObservableObject {
             hoveredWindow = nil
             overlayRect = nil
             overlayContentView?.isHidden = true
+            overlayWindow?.setFrame(NSRect(x: -10000, y: -10000, width: 1, height: 1), display: false)
+            overlayWindow?.orderOut(nil)
         }
     }
 
@@ -595,7 +597,10 @@ final class OpenMissionControlCore: ObservableObject {
     func hideOverlay(keepInputMonitoring: Bool = false) {
         previousWindowFrames = nil
         isOverlayShown = false
+        isMissionControlSurfaceVisible = false
         overlayContentView?.isHidden = true
+        overlayWindow?.setFrame(NSRect(x: -10000, y: -10000, width: 1, height: 1), display: false)
+        overlayWindow?.orderOut(nil)
         overlayRect = nil
         hoveredWindow = nil
         isOverlayHovered = false
@@ -615,17 +620,9 @@ final class OpenMissionControlCore: ObservableObject {
     private func prepareOverlayWindow() {
         guard overlayWindow == nil else { return }
 
-        let desktopFrame = NSScreen.screens.reduce(CGRect.null) { frame, screen in
-            frame.union(screen.frame)
-        }
-        guard !desktopFrame.isNull, !desktopFrame.isEmpty else {
-            logger.error("Could not determine the desktop frame for the overlay window.")
-            return
-        }
-
-        let inactiveFrame = CGRect(origin: desktopFrame.origin, size: inactiveOverlayWindowSize)
         let window = NSWindow(
-            contentRect: inactiveFrame, styleMask: [.borderless], backing: .buffered, defer: false)
+            contentRect: NSRect(x: -10000, y: -10000, width: 1, height: 1),
+            styleMask: [.borderless], backing: .buffered, defer: false)
         window.level = .screenSaver
         window.collectionBehavior = [
             .canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle
@@ -635,8 +632,9 @@ final class OpenMissionControlCore: ObservableObject {
         window.hasShadow = false
         window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
 
-        let contentView = NSView(frame: NSRect(origin: .zero, size: inactiveFrame.size))
+        let contentView = NSView(frame: NSRect(origin: .zero, size: CGSize(width: 1, height: 1)))
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.clear.cgColor
         window.contentView = contentView
@@ -647,26 +645,6 @@ final class OpenMissionControlCore: ObservableObject {
 
         overlayWindow = window
         overlayContentView = overlayView
-
-        // The surface must be ordered before Mission Control starts.
-        // Keep it at one pixel while inactive so AppKit does not route desktop-wide mouse movement through its tracking areas.
-        window.orderFrontRegardless()
-    }
-
-    private func setOverlayWindowExpanded(_ isExpanded: Bool) {
-        guard let overlayWindow else { return }
-
-        let desktopFrame = NSScreen.screens.reduce(CGRect.null) { frame, screen in
-            frame.union(screen.frame)
-        }
-        guard !desktopFrame.isNull, !desktopFrame.isEmpty else { return }
-
-        let targetFrame =
-            isExpanded
-            ? desktopFrame : CGRect(origin: desktopFrame.origin, size: inactiveOverlayWindowSize)
-        guard overlayWindow.frame != targetFrame else { return }
-
-        overlayWindow.setFrame(targetFrame, display: false)
     }
 
     private func destroyOverlayWindow() {

@@ -266,15 +266,24 @@ class MissionControlMonitor {
         var hasSpacesBar = false
         var hasShowDesktopOverlay = false
 
-        for window in windowList {
-            guard window[kCGWindowOwnerName as String] as? String == windowManagerProcessName,
-                let layer = window[kCGWindowLayer as String] as? Int
-            else { continue }
+        let dockPID = getDockPID()
 
-            switch layer { case exposeShieldLevel: hasExposeShield = true
-                case showDesktopOverlayLevel: hasShowDesktopOverlay = true
-                case spacesBarLevel: hasSpacesBar = true
-                default: continue
+        for window in windowList {
+            guard let layer = window[kCGWindowLayer as String] as? Int else { continue }
+            let pid = window[kCGWindowOwnerPID as String] as? pid_t
+            let owner = window[kCGWindowOwnerName as String] as? String
+
+            let isDockExpose = (dockPID != nil && pid == dockPID && layer == 18)
+            let isWMExpose = (owner == windowManagerProcessName && layer == 19)
+
+            if isDockExpose || isWMExpose {
+                hasExposeShield = true
+            }
+            if owner == windowManagerProcessName && layer == spacesBarLevel {
+                hasSpacesBar = true
+            }
+            if owner == windowManagerProcessName && layer == showDesktopOverlayLevel {
+                hasShowDesktopOverlay = true
             }
         }
 
@@ -292,6 +301,7 @@ class MissionControlMonitor {
         guard isOverlayEventMonitoring, let requestNotificationsForWindows else { return }
 
         let currentProcessID = getpid()
+        let dockPID = getDockPID()
         let windowIDs = Set(
             windowList.compactMap { window -> CGWindowID? in
                 guard let windowID = window[kCGWindowNumber as String] as? CGWindowID,
@@ -301,8 +311,8 @@ class MissionControlMonitor {
                 let owner = window[kCGWindowOwnerName as String] as? String
                 let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t
                 let isMissionControlSurface =
-                    owner == windowManagerProcessName
-                    && [exposeShieldLevel, showDesktopOverlayLevel, spacesBarLevel].contains(layer)
+                    (dockPID != nil && ownerPID == dockPID && layer == 18)
+                    || (owner == windowManagerProcessName && [exposeShieldLevel, showDesktopOverlayLevel, spacesBarLevel].contains(layer))
 
                 // At least one subscribed window is required before WindowServer sends even connection-wide create/destroy events.
                 // Regular windows seed delivery, detected Mission Control surfaces are added so their order-out event is also observed.
@@ -321,7 +331,7 @@ class MissionControlMonitor {
         }
     }
 
-    private func getDockPID() -> pid_t? {
+    func getDockPID() -> pid_t? {
         let dockBundleID = "com.apple.dock"
         let runningApps = NSWorkspace.shared.runningApplications
 
